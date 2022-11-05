@@ -1,0 +1,113 @@
+### Playbook to generate golden config for system parameters and deploy them to juniper devices
+# System Params to be standardized include:
+# host-name, services, domain-name, time-zone, name-servers, ntp-servers, syslog, processes
+# Region specific values are dynamically retrieved from Netbox Inventory plugin. Config Context is populated in Netbox per site
+### Can run this in 'check_commit' true mode by default. This will check what would be changed without making changes. i.e. DRY RUN.
+### We can execute the changes by setting 'check_commit' value to false
+---
+- name: Standardize System Params on Junos Config
+  hosts: all
+  gather_facts: false
+  vars:
+    # lookup the site slug of each device, use this later to find time-zone
+    device_site: "{{ hostvars[inventory_hostname]['sites'][0] }}"
+    # lookup secrets from ansible vault
+    tacacs_pw: "{{ tacacs_pw }}"
+    root_pw: "{{ root_pw }}"
+    snmp_cred: "{{ snmp_cred }}"
+    ssh_pub_key: "{{ ssh_pub_key }}"
+    ## Hash Algo to use for junos key Generation
+    hash_algo: 'sha512'
+    # netbox url and token for time-zone lookup per site
+    netbox_url: "{{ netbox_url }}"
+    netbox_token: "{{ netbox_token }}"
+  tasks:
+    - name: Lookup Timezone Info by Device Site
+      # Using Netbox REST API to make a GET call for site information per each host
+      uri:
+        url: "{{ netbox_url }}/api/dcim/sites/?slug={{ device_site }}"
+        method: GET
+        validate_certs: no
+        headers:
+          Authorization: "Token {{ netbox_token }}"
+      register: site_id_results
+      delegate_to: localhost
+      changed_when: false
+
+    - name: Set Time Zone Fact to be used in jinja2 template
+      # Extract timezone of site, this will be the time-zone to use on each device in that site
+      set_fact:
+        timezone: "{{ site_id_results.json.results[0].time_zone }}"
+      changed_when: false
+    
+    - name: Grab switch software fw version from Netbox and set as integer Value. Can also get this from gathered facts if desired
+      set_fact:
+        code_version: "{{ hostvars[inventory_hostname]['custom_fields']['code_version'].split('.')[0] }}"
+      changed_when: false
+
+      # For SNMP Portion -- Grab snmpv3 info to extract engineID
+    - name: get snmp info
+      junipernetworks.junos.junos_command:
+        commands: show snmp v3
+        display: text
+      register: output_snmp_text
+      changed_when: false
+
+      # Use regex to parse engineID from text blob. Replace white space.
+    - name: parse snmp engine id
+      set_fact:
+        engine_id: "{{ output_snmp_text.stdout[0] | regex_search('.*Local engine ID: (.*[0-9a-fA-F])', '\\1') | replace(' ', '') }}"
+      changed_when: false
+
+      # use custom filter to generate snnp 9key based on PW + engineID
+    - name: generate snmp_9key
+      set_fact:
+        snmp_9key: "{{ engine_id[0] | gen_snmp_9key(snmp_cred)}}"
+      changed_when: false
+
+    # use custom filter to generate 9key for TACACS service
+    - name: generate tacacs_key
+      set_fact:
+        tacacs_key: "{{ tacacs_pw | gen_sys_9key(inventory_hostname) }}"
+      changed_when: false
+
+    # Generate unique Junos Root Login Key per device using hostname as seed
+    - name: change hash to md5 if legacy junos firmware
+      set_fact:
+        hash_algo: 'md5'
+      when: code_version|int < 14
+
+    - name: generate root login key per device
+      set_fact:
+        root_key: "{{ root_pw | password_hash(hash_algo, 65534 | random(seed=inventory_hostname) | string) }}"
+    
+    - name: Template Lookup and Config Generation
+      # generate template of system params. Variables are filled in by Netbox (from hostvars pulled to inventory)
+      template:
+        src: "{{ template_name }}.j2"
+        # create a temp candidate config file to be loaded in next task
+        dest: "{{ inventory_hostname }}.conf"
+      delegate_to: localhost
+      # this task will always generate a change, don't need to see it.
+      changed_when: false
+
+    - name: Load Standard System Parameters to Juniper Device
+      junipernetworks.junos.junos_config:
+        # if TRUE this will be a DRY RUN (no changes)
+        check_commit: "{{ check_commit }}"
+        src_format: text
+        # we use the replace flag to overwrite specific blocks of config
+        update: replace
+        # temp candidate config file created in previous task
+        src: "{{ inventory_hostname }}.conf"
+      register: result
+      
+    # if running in compliance mode, error out when change is detected and action is needed to be taken. i.e alert on non-compliance
+    - debug:
+        msg: "Change detected, action needed"
+      when: 
+        - result.changed
+        - check_commit
+      failed_when: 
+        - result.changed
+        - check_commit

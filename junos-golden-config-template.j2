@@ -1,0 +1,148 @@
+replace:
+system {
+
+    root-authentication {
+        encrypted-password "{{ root_key }}"; ## SECRET-DATA
+    }
+
+    authentication-order [ password tacplus ];
+
+    host-name {{ inventory_hostname }};
+
+    services {
+        ssh {
+	    root-login deny;
+            protocol-version v2;
+            max-sessions-per-connection 32;
+            {% if code_version|int >= 19 %}
+            sftp-server;
+            {% endif %}
+        }
+        netconf {
+            ssh;
+        }
+    }
+
+    domain-name {{ hostvars[inventory_hostname]['config_context'][0]['domain-name'] }};
+
+    time-zone {{ timezone }};
+
+    name-server {
+		{% for item in hostvars[inventory_hostname]['config_context'][0]['name-servers'] %}
+        {{ item }};
+		{% endfor %}
+    }
+
+    syslog {
+        user * {
+            any emergency;
+        }
+		{% for item in hostvars[inventory_hostname]['config_context'][0]['log-agg'] %}
+        host {{ item }} {
+            any any;
+        }
+		{% endfor %}
+        file messages {
+            any warning;
+            authorization info;
+        }
+        source-address {{ ansible_host }};
+    }
+
+    ntp {
+        server {{ hostvars[inventory_hostname]['config_context'][0]['ntp-servers'][0] }} prefer;
+		{% for item in hostvars[inventory_hostname]['config_context'][0]['ntp-servers'][1:] %}
+        server {{ item }};
+		{% endfor %}
+		source-address {{ ansible_host }};
+    }
+
+    login {
+
+        user ansible {
+            class super-user;
+            authentication {
+                ssh-rsa "{{ ssh_pub_key }}"; ## SECRET-DATA
+            }
+
+    }
+
+    tacplus-server {
+        {{ hostvars[inventory_hostname]['config_context'][0]['tacplus-servers'][0] }} {
+            port 49;
+            secret "{{ tacacs_key }}"; ## SECRET-DATA
+            source-address {{ ansible_host }};
+        }
+        {{ hostvars[inventory_hostname]['config_context'][0]['tacplus-servers'][1] }} {
+            port 49;
+            secret "{{ tacacs_key }}"; ## SECRET-DATA
+            source-address {{ ansible_host }};
+        }
+    }
+    
+    accounting {
+        events [ login interactive-commands ];
+        destination {
+            tacplus {
+                server {
+                    {{ hostvars[inventory_hostname]['config_context'][0]['tacplus-servers'][0] }} {
+                        port 49;
+                        secret "{{ tacacs_key }}"; ## SECRET-DATA
+                        timeout 1;
+                        source-address {{ ansible_host }};
+                    }
+                    {{ hostvars[inventory_hostname]['config_context'][0]['tacplus-servers'][1] }} {
+                        port 49;
+                        secret "{{ tacacs_key }}"; ## SECRET-DATA
+                        timeout 1;
+                        source-address {{ ansible_host }};
+                    }
+                }
+            }
+        }
+    }
+}
+
+replace:
+snmp {
+    description {{ inventory_hostname }};
+    location {{ device_site }};
+    contact "email@email.com";
+    v3 {
+        usm {
+            local-engine {
+                user usernameforsnmp {
+                    authentication-sha {
+                        authentication-key "{{ snmp_9key }}"; ## SECRET-DATA
+                    }
+                    privacy-aes128 {
+                        privacy-key "{{ snmp_9key }}"; ## SECRET-DATA
+                    }
+                }
+            }
+        }
+        vacm {
+            security-to-group {
+                security-model usm {
+                    security-name usernameforsnmp {
+                        group groupforsnmp;
+                    }
+                }
+            }
+            access {
+                group groupforsnmp {
+                    default-context-prefix {
+                        security-model usm {
+                            security-level privacy {
+                                read-view view-all;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    view view-all {
+        oid 1 include;
+    }
+    }
