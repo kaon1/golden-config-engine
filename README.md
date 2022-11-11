@@ -6,6 +6,8 @@ Enforce intended network state using ansible and a rendered golden configuration
 
 The purpose of this repository is to provide a production-ready ansible process which standardizes system configuration on Juniper switches and routers.
 
+Related Blog Post can be found here: https://kaonbytes.com/p/golden-configuration-deployment-with-ansible-and-netbox/
+
 The Steps:
   - Populate central Source Of Truth (SoT) with desired system variables and config context. **Netbox** is the preferred system.
   - Populate Ansible Vault, or some other credential manager with secrets
